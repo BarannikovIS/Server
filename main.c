@@ -80,3 +80,153 @@ int setContentType(char *filepath, char **contentType) {
     }
     else return NULL;
 }
+//обрабатывает запрос клиента и отправляет ответ
+void *handleClient(void *arg) {   
+	
+	int filesize = 0;
+    char *line = NULL;
+    size_t len = 0;
+    char *filepath = NULL;
+	size_t filepath_len = 0;
+	int res = 0;
+    FILE *fd;
+	FILE *file;
+	char *contentType = (char*) malloc(255*sizeof(char));
+	int cd = *((int *)arg);
+	
+	
+	pthread_mutex_lock(&lock[cd%5]);
+	pthread_mutex_unlock(&lock[cd%5]);
+	
+	int empty_str_count = 0;
+    printf("In thread #%d cd =%d\n", cd,clients[cd]);
+    fd = fdopen(clients[cd], "r");
+    if (fd == NULL) {
+        printf("error open client descriptor as file \n");
+    }
+	printf("In thread #%d: after fdopen\n", clients[cd]);
+    while ((res = getline(&line, &len, fd)) != -1) {
+        if (strstr(line, "GET")) {
+        	printf("1");
+            parseFileName(line, &filepath, &filepath_len);
+        }
+        if (strcmp(line, "\r\n") == 0) {
+        	printf("2");
+            empty_str_count++;
+        }
+        else {
+        	printf("3");
+            empty_str_count = 0;
+        }
+        if (empty_str_count == 1) {
+        	printf("4");
+            break;
+        }
+        printf("%s", line);
+    }
+    printf("In thread #%d: open %s \n", clients[cd],filepath);
+
+    file = fopen(filepath, "rb");
+	printf("In thread #%d: after fopen\n", clients[cd]);
+    if (file == NULL) {
+        printf("404 File Not Found \n");
+        headers(clients[cd], 0, 404, contentType);
+    } 
+    else if (file!=NULL && setContentType(filepath, &contentType)==NULL)
+    {
+        printf("500 Internal Server Error \n");
+        headers(clients[cd], 0, 500, contentType);
+    }
+    else if (file!=NULL && setContentType(filepath, &contentType)!=NULL){
+        fseek(file, 0L, SEEK_END);
+        filesize = ftell(file);
+        fseek(file, 0L, SEEK_SET);
+        printf("%s", contentType);
+        headers(clients[cd], filesize, 200, contentType);
+        unsigned char buf[1024];
+		int bytes = 0;
+		while((bytes=fread(buf,1,1024,file))>0) {
+		    //int n = fread(buf,filesize,1,file);
+		    //if(n==0)
+		    //    printf("Read file Error");
+		    res = send(clients[cd], buf, 1024, 0);
+		    if (res == -1) {
+		        printf("send error \n");
+		    }
+		}		
+    }
+	//pthread_mutex_unlock(&lock[cd%5]);
+	free(arg);
+    close(clients[cd]);
+	clients[cd]=-1;
+    return (void*)0;
+}
+int main() {
+	int ld = 0;
+	int res = 0;
+	//int cd = 0; 
+	//int lastcd = 0;
+	const int backlog = 10;
+	struct sockaddr_in saddr;
+	struct sockaddr_in caddr;
+
+
+	socklen_t size_saddr;
+	socklen_t size_caddr;
+	
+	int tmp =0;
+	while(tmp<5){
+		pthread_mutex_init(&lock[tmp],NULL);
+		pthread_mutex_lock(&lock[tmp]);
+		createThread(tmp);
+		tmp++;
+	}
+	
+	int slot=0;
+	//установка всех элементов в -1
+    int i;
+    for (i=0; i<CONNMAX; i++)
+        clients[i]=-1;
+
+	ld = socket(AF_INET, SOCK_STREAM, 0);
+	if (ld == -1) {
+		printf("listener create error \n");
+	}
+	saddr.sin_family = AF_INET;
+	saddr.sin_port = htons(8080);
+	saddr.sin_addr.s_addr = INADDR_ANY;
+	res = bind(ld, (struct sockaddr *)&saddr, sizeof(saddr));
+	if (res == -1) {
+		printf("bind error \n");
+	}
+	res = listen(ld, backlog);
+	if (res == -1) {
+		printf("listen error \n");
+	}
+	
+	//int slot=-1;
+	int j=0;
+	while (1) {
+		clients[slot] = accept(ld, (struct sockaddr *)&caddr, &size_caddr);
+		if(j>4){//если все потоки отработали, то их заново надо создать
+			j=0;
+			int k=0;
+			int coeff=slot/5;
+			while(k<5){
+				if(pthread_mutex_trylock(&lock[k])==0)
+					createThread(k+5*coeff);
+				k++;
+			}
+		}
+		if (clients[slot] < -1) {
+			printf("accept error \n");
+		}
+		else{
+			//printf("client in %d descriptor. Client addr is %d \n", cd, caddr.sin_addr.s_addr);
+			pthread_mutex_unlock(&lock[j]);
+		}
+		j++;
+		while(clients[slot]!=-1) slot =(slot+1)%CONNMAX;
+	}
+	return 0;
+}
